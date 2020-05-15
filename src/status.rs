@@ -1,6 +1,5 @@
-use systemstat::{CpuTime, Duration, Platform};
+use systemstat::{Duration, Platform};
 use serde::*;
-use anyhow::*;
 use log::*;
 use std::time::SystemTime;
 use xactor::Message;

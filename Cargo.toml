@@ -27,6 +27,9 @@ typename = "0.1.2"
 serde = {version = "1" , features = ["derive"]}
 sled = { version = "0.31", features = ["io_uring", "testing"] }
 systemstat = "0.1.5"
+tempfile = "3.1.0"
+prettytable-rs = "0.8.0"
+serde_json = "*"
 
 [patch."crates-io"]
 async-tungstenite = { git = "https://github.com/sdroege/async-tungstenite" }

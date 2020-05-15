@@ -1,7 +1,164 @@
 use structopt::*;
+use xactor::Addr;
+use crate::database::{DbMsg, DbReply, TraceModel};
+use log::*;
+use anyhow::*;
+use crate::utils::{CheckError, to_table};
+use std::io::Write;
+
+#[derive(StructOpt, Debug)]
+pub enum SubCommand {
+    #[structopt(help = "start the endpoint")]
+    Endpoint {
+        #[structopt(short, long, env = "GIRASOL_SERVER")]
+        server: String
+    },
+    #[structopt(help = "add new trace model")]
+    Add {
+        #[structopt(short, long, env = "EDITOR", default_value = "nano")]
+        editor: String
+    },
+    #[structopt(help = "remove a trace model")]
+    Remove {
+        #[structopt(short, long)]
+        name: String
+    },
+    #[structopt(help = "list all trace models")]
+    List {
+        #[structopt(short, long)]
+        detail: bool
+    },
+    #[structopt(help = "check one trace model")]
+    Check {
+        #[structopt(short, long)]
+        name: String
+    },
+}
+
 
 #[derive(StructOpt, Debug)]
 pub struct Config {
-    #[structopt(short, long, env="GIRASOL_HOME")]
-    pub home: String
+    #[structopt(short = "d", long, env = "GIRASOL_HOME")]
+    pub home: String,
+    #[structopt(subcommand)]
+    pub subcommand: SubCommand,
+}
+
+pub async fn handle_list(mut db: Addr<crate::database::DataActor>, detail: bool) {
+    match db.call(DbMsg::QueryAll).await
+        .map_err(|x|x.into())
+        .and_then(|x|x) {
+        Err(e) => error!("{}", e),
+        Ok(DbReply::AllList(list)) => {
+            if detail {
+                simd_json::to_string_pretty(&list).map(|x| println!("{}", x))
+                    .map_err(|x|x.into())
+                    .check_error()
+            } else {
+                let list : Vec<String> = list.into_iter().map(|x|x.name)
+                    .collect();
+                simd_json::to_string_pretty(&list).map(|x| println!("{}", x))
+                    .map_err(|x|x.into())
+                    .check_error()
+            }
+        },
+        _ => unsafe {std::intrinsics::unreachable(); }
+    }
+}
+
+pub async fn handle_add(mut db: Addr<crate::database::DataActor>, editor: String) {
+    let content : Result<TraceModel, Error> = tempfile::NamedTempFile::new()
+        .map_err(|x|x.into())
+        .and_then(|mut file| {
+            simd_json::to_string_pretty(&crate::database::TraceModel::default())
+                .map_err(|x|x.into())
+                .and_then(|x| file.write_all(x.as_bytes())
+                    .map_err(|x|x.into()))
+                .map(|_| file)
+        })
+        .and_then(|file| {
+            std::process::Command::new(editor)
+                .arg(file.path())
+                .spawn()
+                .and_then(|mut x|x.wait())
+                .map_err(|x|x.into())
+                .and_then(|x|
+                    if x.success() {
+                        file.reopen().map_err(|x|x.into())
+                    } else {
+                        Err(anyhow!("editor returned unexpected code: {:?}", x.code()))
+                    }
+                )
+        })
+        .and_then(|x| {
+            simd_json::from_reader(x)
+                .map_err(|x|x.into())
+        });
+    match content {
+        Ok(model) => {
+            to_table(&model).map(|x|x.printstd())
+                .check_error();
+            println!("are you sure to add: {} [Y/n]", model.name);
+            let mut line = String::new();
+            if let Err(e) = std::io::stdin().read_line(&mut line) {
+                error!("{}", e);
+                async_std::process::exit(1);
+            }
+            if "y" != line.trim().to_ascii_lowercase() {
+                async_std::process::exit(0);
+            }
+            if model.name.is_empty() {
+                error!("cannot add empty name");
+                async_std::process::exit(1);
+            }
+            match db.call(DbMsg::Add(model)).await
+                .map_err(|x|x.into())
+                .and_then(|x|x) {
+                Err(e) => error!("{}", e),
+                _ => info!("added successfully")
+            }
+        }
+        Err(e) => error!("{}", e)
+    }
+}
+
+pub async fn handle_check(mut db: Addr<crate::database::DataActor>, name: String) -> bool {
+    match db.call(DbMsg::Get(name)).await
+        .map_err(|x|x.into())
+        .and_then(|x|x) {
+        Ok(DbReply::GetResult(model)) => {
+            match to_table(&model) {
+                Ok(e) => {e.printstd();
+                    return true;
+                }
+                Err(e) =>  {
+                    error!("{}", e);
+                }
+            }
+        }
+        Err(e) => error!("{}", e),
+        _ => unsafe {std::intrinsics::unreachable(); }
+    }
+    false
+}
+
+pub async fn handle_remove(mut db: Addr<crate::database::DataActor>, name: String) {
+    if !handle_check(db.clone(), name.clone()).await {
+        async_std::process::exit(1);
+    }
+    println!("are you sure to remove: {} [Y/n]", name);
+    let mut line = String::new();
+    if let Err(e) = std::io::stdin().read_line(&mut line) {
+        error!("{}", e);
+        async_std::process::exit(1);
+    }
+    if "y" != line.trim().to_ascii_lowercase() {
+        async_std::process::exit(0);
+    }
+    match db.call(DbMsg::Remove(name)).await
+        .map_err(|x|x.into())
+        .and_then(|x|x) {
+        Err(e) => error!("{}", e),
+        _ => info!("removed successfully")
+    }
 }

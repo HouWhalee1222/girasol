@@ -1,3 +1,4 @@
+#![allow(unused)]
 use std::path::{Path, PathBuf};
 
 use anyhow::*;
@@ -79,9 +80,15 @@ pub enum Tracer {
     STAP,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+impl Default for Tracer {
+    fn default() -> Self {
+        Tracer::EBPF
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct TraceModel {
-    name: String,
+    pub(crate) name: String,
     function_list: Vec<String>,
     process: PathBuf,
     tracer: Tracer,
@@ -109,12 +116,6 @@ pub enum DbReply {
 impl Actor for DataActor {
     async fn started(&mut self, _: &xactor::Context<Self>) {
         info!("database actor started");
-    }
-    async fn stopped(&mut self, _: &xactor::Context<Self>) {
-        if let Err(e) = self.db.flush_async().await
-            .map(|num| trace!("database finalized with {} bytes", num)) {
-            error!("{}", e);
-        }
     }
 }
 
@@ -145,7 +146,9 @@ impl Handler<DbMsg> for DataActor {
             }
             DbMsg::Remove(name) => {
                 match self.db.contains_key(&name) {
-                    Ok(true) => self.db.remove(name).map(|_| DbReply::Success)
+                    Ok(true) => self.db.remove(name)
+                        .and_then(|_| self.db.flush().map_err(|x|x.into()))
+                        .map(|_| DbReply::Success)
                         .map_err(|x| x.into()),
                     Ok(false) => Err(anyhow!("{} does not exist", name)),
                     Err(e) => Err(e.into())
