@@ -73,29 +73,17 @@ impl DataActor {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type")]
-pub enum Tracer {
-    EBPF,
-    STAP,
-}
 
-impl Default for Tracer {
-    fn default() -> Self {
-        Tracer::EBPF
-    }
-}
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct TraceModel {
     pub(crate) name: String,
-    function_list: Vec<String>,
-    process: PathBuf,
-    tracer: Tracer,
-    args: Vec<String>,
-    env: Vec<String>,
-    lasting: usize,
-    interval: usize,
+    pub function_list: Vec<String>,
+    pub process: String,
+    pub args: Vec<String>,
+    pub envs: Vec<(String, String)>,
+    pub lasting: usize,
+    pub interval: usize,
 }
 
 #[xactor::message(result = "anyhow::Result<DbReply>")]

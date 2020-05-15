@@ -30,6 +30,11 @@ systemstat = "0.1.5"
 tempfile = "3.1.0"
 prettytable-rs = "0.8.0"
 serde_json = "*"
+hashbrown = { version = "*", features = ["nightly", "default", "ahash-compile-time-rng"] }
+crossbeam-skiplist = { git = "https://github.com/crossbeam-rs/crossbeam" }
+[profile.release]
+opt-level = 3
+lto = "fat"
 
 [patch."crates-io"]
 async-tungstenite = { git = "https://github.com/sdroege/async-tungstenite" }

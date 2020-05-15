@@ -1,36 +1,38 @@
+use std::io::Write;
+
+use anyhow::*;
+use log::*;
 use structopt::*;
 use xactor::Addr;
+
 use crate::database::{DbMsg, DbReply, TraceModel};
-use log::*;
-use anyhow::*;
 use crate::utils::{CheckError, to_table};
-use std::io::Write;
 
 #[derive(StructOpt, Debug)]
 pub enum SubCommand {
-    #[structopt(help = "start the endpoint")]
+    #[structopt(about = "Start the endpoint")]
     Endpoint {
-        #[structopt(short, long, env = "GIRASOL_SERVER")]
+        #[structopt(short, long, env = "GIRASOL_SERVER", help="The server websocket address")]
         server: String
     },
-    #[structopt(help = "add new trace model")]
+    #[structopt(about = "Add new trace model")]
     Add {
-        #[structopt(short, long, env = "EDITOR", default_value = "nano")]
+        #[structopt(short, long, env = "EDITOR", default_value = "nano", help="The editor to use")]
         editor: String
     },
-    #[structopt(help = "remove a trace model")]
+    #[structopt(about = "Remove a trace model")]
     Remove {
-        #[structopt(short, long)]
+        #[structopt(short, long, help="The name of the model")]
         name: String
     },
-    #[structopt(help = "list all trace models")]
+    #[structopt(about = "List all trace models")]
     List {
-        #[structopt(short, long)]
+        #[structopt(short, long, help="Whether to show detailed information in json")]
         detail: bool
     },
-    #[structopt(help = "check one trace model")]
+    #[structopt(about = "Check one trace model")]
     Check {
-        #[structopt(short, long)]
+        #[structopt(short, long, help="The name of the model")]
         name: String
     },
 }
@@ -38,7 +40,7 @@ pub enum SubCommand {
 
 #[derive(StructOpt, Debug)]
 pub struct Config {
-    #[structopt(short = "d", long, env = "GIRASOL_HOME")]
+    #[structopt(short = "d", long, env = "GIRASOL_HOME", help = "The home directory of Girasol")]
     pub home: String,
     #[structopt(subcommand)]
     pub subcommand: SubCommand,
@@ -46,45 +48,45 @@ pub struct Config {
 
 pub async fn handle_list(mut db: Addr<crate::database::DataActor>, detail: bool) {
     match db.call(DbMsg::QueryAll).await
-        .map_err(|x|x.into())
-        .and_then(|x|x) {
+        .map_err(|x| x.into())
+        .and_then(|x| x) {
         Err(e) => error!("{}", e),
         Ok(DbReply::AllList(list)) => {
             if detail {
                 simd_json::to_string_pretty(&list).map(|x| println!("{}", x))
-                    .map_err(|x|x.into())
+                    .map_err(|x| x.into())
                     .check_error()
             } else {
-                let list : Vec<String> = list.into_iter().map(|x|x.name)
+                let list: Vec<String> = list.into_iter().map(|x| x.name)
                     .collect();
                 simd_json::to_string_pretty(&list).map(|x| println!("{}", x))
-                    .map_err(|x|x.into())
+                    .map_err(|x| x.into())
                     .check_error()
             }
-        },
-        _ => unsafe {std::intrinsics::unreachable(); }
+        }
+        _ => unsafe { std::intrinsics::unreachable(); }
     }
 }
 
 pub async fn handle_add(mut db: Addr<crate::database::DataActor>, editor: String) {
-    let content : Result<TraceModel, Error> = tempfile::NamedTempFile::new()
-        .map_err(|x|x.into())
+    let content: Result<TraceModel, Error> = tempfile::NamedTempFile::new()
+        .map_err(|x| x.into())
         .and_then(|mut file| {
             simd_json::to_string_pretty(&crate::database::TraceModel::default())
-                .map_err(|x|x.into())
+                .map_err(|x| x.into())
                 .and_then(|x| file.write_all(x.as_bytes())
-                    .map_err(|x|x.into()))
+                    .map_err(|x| x.into()))
                 .map(|_| file)
         })
         .and_then(|file| {
             std::process::Command::new(editor)
                 .arg(file.path())
                 .spawn()
-                .and_then(|mut x|x.wait())
-                .map_err(|x|x.into())
+                .and_then(|mut x| x.wait())
+                .map_err(|x| x.into())
                 .and_then(|x|
                     if x.success() {
-                        file.reopen().map_err(|x|x.into())
+                        file.reopen().map_err(|x| x.into())
                     } else {
                         Err(anyhow!("editor returned unexpected code: {:?}", x.code()))
                     }
@@ -92,11 +94,11 @@ pub async fn handle_add(mut db: Addr<crate::database::DataActor>, editor: String
         })
         .and_then(|x| {
             simd_json::from_reader(x)
-                .map_err(|x|x.into())
+                .map_err(|x| x.into())
         });
     match content {
         Ok(model) => {
-            to_table(&model).map(|x|x.printstd())
+            to_table(&model).map(|x| x.printstd())
                 .check_error();
             println!("are you sure to add: {} [Y/n]", model.name);
             let mut line = String::new();
@@ -112,8 +114,8 @@ pub async fn handle_add(mut db: Addr<crate::database::DataActor>, editor: String
                 async_std::process::exit(1);
             }
             match db.call(DbMsg::Add(model)).await
-                .map_err(|x|x.into())
-                .and_then(|x|x) {
+                .map_err(|x| x.into())
+                .and_then(|x| x) {
                 Err(e) => error!("{}", e),
                 _ => info!("added successfully")
             }
@@ -124,20 +126,21 @@ pub async fn handle_add(mut db: Addr<crate::database::DataActor>, editor: String
 
 pub async fn handle_check(mut db: Addr<crate::database::DataActor>, name: String) -> bool {
     match db.call(DbMsg::Get(name)).await
-        .map_err(|x|x.into())
-        .and_then(|x|x) {
+        .map_err(|x| x.into())
+        .and_then(|x| x) {
         Ok(DbReply::GetResult(model)) => {
             match to_table(&model) {
-                Ok(e) => {e.printstd();
+                Ok(e) => {
+                    e.printstd();
                     return true;
                 }
-                Err(e) =>  {
+                Err(e) => {
                     error!("{}", e);
                 }
             }
         }
         Err(e) => error!("{}", e),
-        _ => unsafe {std::intrinsics::unreachable(); }
+        _ => unsafe { std::intrinsics::unreachable(); }
     }
     false
 }
@@ -156,8 +159,8 @@ pub async fn handle_remove(mut db: Addr<crate::database::DataActor>, name: Strin
         async_std::process::exit(0);
     }
     match db.call(DbMsg::Remove(name)).await
-        .map_err(|x|x.into())
-        .and_then(|x|x) {
+        .map_err(|x| x.into())
+        .and_then(|x| x) {
         Err(e) => error!("{}", e),
         _ => info!("removed successfully")
     }
