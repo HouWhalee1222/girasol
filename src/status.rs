@@ -4,8 +4,8 @@ use anyhow::*;
 use log::*;
 use std::time::SystemTime;
 use xactor::Message;
-
-#[derive(Serialize, Deserialize, Debug)]
+use typename::TypeName;
+#[derive(Serialize, Deserialize, Debug, TypeName)]
 pub struct HeartbeatPacket {
     cpu_load: f32,
     cpu_temp: f32,
