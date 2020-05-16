@@ -1,14 +1,13 @@
-use std::io::{Write, BufRead};
+use std::io::{BufRead, Write};
 use std::process::Stdio;
 
 use anyhow::*;
-use serde::*;
-use typename::*;
-use async_std::sync::Arc;
 use hashbrown::HashMap;
 use log::*;
+use serde::*;
 use systemstat::Duration;
 use tempfile::NamedTempFile;
+use typename::*;
 use xactor::{Actor, Addr, Context, Handler, Message};
 
 use crate::database::TraceModel;
@@ -43,8 +42,8 @@ fn to_tempfile(m: &TraceModel) -> Result<tempfile::NamedTempFile> {
 }
 
 pub struct HouseKeeper {
-    send_client: Addr<crate::client::SendClient>,
-    running_trace: HashMap<String, Addr<TraceActor>>,
+    pub(crate) send_client: Addr<crate::client::SendClient>,
+    pub(crate) running_trace: HashMap<String, Addr<TraceActor>>,
 }
 
 pub struct TraceActor {
@@ -58,29 +57,49 @@ pub struct TraceActor {
 struct NextRound;
 
 #[xactor::message(result = "()")]
-struct Unregister(String);
+pub enum KeeperMsg {
+    Unregister(String),
+    StartAll(Vec<TraceModel>),
+    Start(TraceModel),
+}
+
+#[xactor::message(result = "Vec<String>")]
+pub struct AllRunning;
 
 #[async_trait::async_trait]
 impl Actor for TraceActor {
     async fn started(&mut self, ctx: &Context<Self>) {
         if let Err(e) = ctx.address().send(NextRound) {
-            error!("trace {} cannot start the event, going to suicide!", self.model.name);
+            error!("trace {} cannot start the event with err: {}, going to suicide!", self.model.name, e);
             ctx.stop(None);
         }
     }
     async fn stopped(&mut self, _: &Context<Self>) {
         info!("trace {} actor stopped", self.model.name);
-        self.house_keeper.send(Unregister(self.model.name.clone()))
-            .map_err(|x|x.into())
+    }
+}
+
+impl TraceActor {
+    async fn commit_suicide(&mut self) {
+        self.house_keeper.send(KeeperMsg::Unregister(self.model.name.clone()))
+            .map_err(|x| x.into())
             .check_error()
     }
 }
+
 #[xactor::message(result = "()")]
 #[derive(Serialize, Deserialize, TypeName)]
 pub struct Connect {
     trace_name: String,
     callee: String,
-    caller: String
+    caller: String,
+}
+
+#[xactor::message(result = "()")]
+#[derive(Serialize, Deserialize, TypeName)]
+pub struct TraceError {
+    trace_name: String,
+    content: String,
 }
 
 #[async_trait::async_trait]
@@ -92,7 +111,7 @@ impl Handler<NextRound> for TraceActor {
                 Err(e) => {
                     error!("trace {} cannot create script file with error {}, going to suicide"
                            , self.model.name, e);
-                    ctx.stop(None);
+                    self.commit_suicide().await;
                 }
             }
         }
@@ -102,15 +121,29 @@ impl Handler<NextRound> for TraceActor {
             .envs(self.model.envs.clone().into_iter())
             .args(self.model.args.iter())
             .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
-            .map(|mut x| x.stdout.unwrap()) {
+            .map(|x| (x.stdout.unwrap(), x.stderr.unwrap())) {
             Err(e) => {
                 error!("trace {} cannot create script file with error {}, going to suicide"
                        , self.model.name, e);
-                ctx.stop(None);
-            },
-            Ok(out) => {
+                self.commit_suicide().await;
+            }
+            Ok((out, err)) => {
                 let mut callee = None;
+                let err_name = self.model.name.clone();
+                let mut err_client = self.send_client.clone();
+                let err_handle = async_std::task::spawn(async move {
+                    for i in std::io::BufReader::new(err).lines() {
+                        if let Ok(c) = i {
+                            error!("trace {} error: {}", err_name, c);
+                            err_client.send(TraceError {
+                                trace_name: err_name.clone(),
+                                content: c,
+                            }).check_error();
+                        }
+                    }
+                });
                 for i in std::io::BufReader::new(out).lines() {
                     if let Ok(line) = i {
                         if let Some(t) = callee.take() {
@@ -118,16 +151,16 @@ impl Handler<NextRound> for TraceActor {
                                 let mut split = line.split(" : ");
                                 split.next();
                                 if let Some(e) = split.next()
-                                    .and_then(|x|x.split("+")
+                                    .and_then(|x| x.split("+")
                                         .next())
-                                    .filter(|x| !x.starts_with("0x")){
-                                       self.send_client.send(Connect {
-                                           trace_name: self.model.name.clone(),
-                                           callee: t,
-                                           caller: String::from(e)
-                                       })
-                                           .map_err(|x|x.into())
-                                           .check_error()
+                                    .filter(|x| !x.starts_with("0x")) {
+                                    self.send_client.send(Connect {
+                                        trace_name: self.model.name.clone(),
+                                        callee: t,
+                                        caller: String::from(e),
+                                    })
+                                        .map_err(|x| x.into())
+                                        .check_error()
                                 }
                             }
                         } else {
@@ -141,8 +174,10 @@ impl Handler<NextRound> for TraceActor {
                         callee = None;
                     }
                 }
+                err_handle.await;
             }
         }
+        ctx.send_later(NextRound, Duration::from_secs(self.model.interval as u64));
     }
 }
 
@@ -155,7 +190,7 @@ impl HouseKeeper {
                 house_keeper: ctx.address(),
                 send_client: self.send_client.clone(),
                 model,
-                file: None
+                file: None,
             };
             let addr = actor.start().await;
             self.running_trace.insert(name, addr);
@@ -174,8 +209,34 @@ impl Actor for HouseKeeper {
 }
 
 #[async_trait::async_trait]
-impl Handler<Unregister> for HouseKeeper {
-    async fn handle(&mut self, ctx: &Context<Self>, msg: Unregister) -> <Unregister as Message>::Result {
-        self.running_trace.remove(msg.0.as_str());
+impl Handler<KeeperMsg> for HouseKeeper {
+    async fn handle(&mut self, ctx: &Context<Self>, msg: KeeperMsg) -> <KeeperMsg as Message>::Result {
+        match msg {
+            KeeperMsg::Unregister(name) =>
+                {
+                    for mut i in self.running_trace.remove(name.as_str()) {
+                        i.stop(None).check_error();
+                    }
+                }
+            KeeperMsg::StartAll(list) => {
+                for i in list {
+                    if !self.running_trace.contains_key(i.name.as_str()) {
+                        self.create_actor(i, ctx).await.check_error();
+                    }
+                }
+            }
+            KeeperMsg::Start(model) => {
+                if !self.running_trace.contains_key(model.name.as_str()) {
+                    self.create_actor(model, ctx).await.check_error();
+                }
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler<AllRunning> for HouseKeeper {
+    async fn handle(&mut self, _: &Context<Self>, _: AllRunning) -> <AllRunning as Message>::Result {
+        self.running_trace.keys().map(|x|x.clone()).collect()
     }
 }

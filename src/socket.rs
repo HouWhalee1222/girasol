@@ -6,11 +6,12 @@ use async_tls::client::TlsStream;
 use async_tungstenite::stream::Stream;
 use futures::io::{ReadHalf, WriteHalf};
 use log::*;
-use crate::utils::CheckError;
 use ws_stream_tungstenite::WsStream;
 use xactor::Addr;
 
 use crate::database::{DbMsg, DbReply, TraceModel};
+use crate::trace::KeeperMsg;
+use crate::utils::CheckError;
 
 type SocketStream = WsStream<Stream<TcpStream, TlsStream<TcpStream>>>;
 
@@ -47,6 +48,10 @@ pub enum ServerMsg {
     Query(String),
     Add(TraceModel),
     Remove(String),
+    Start(String),
+    Stop(String),
+    StartAll,
+    QueryRunning,
 }
 
 #[xactor::message(result = "()")]
@@ -57,14 +62,14 @@ pub enum ClientReply {
     QueryList(Vec<TraceModel>),
     Error(String),
     Success(String),
+    Running(Vec<String>),
 }
-
-
 
 
 impl ReadSocket {
     pub async fn listen(&mut self, db: Addr<crate::database::DataActor>,
-                        client: Addr<crate::client::SendClient>) {
+                        client: Addr<crate::client::SendClient>,
+                        keeper: Addr<crate::trace::HouseKeeper>) {
         info!("start listening server event");
         let stream = self.read_stream.take().unwrap();
         let mut reader = async_std::io::BufReader::new(stream)
@@ -82,7 +87,7 @@ impl ReadSocket {
                                     .check_error();
                             });
                             debug!("reply error to server at task {}", handle.task().id())
-                        },
+                        }
                         Ok(msg) => {
                             match msg {
                                 ServerMsg::Reply(msg) => {
@@ -107,7 +112,7 @@ impl ReadSocket {
                                                             client.send(ClientReply::QueryResult(t))
                                                                 .check_error();
                                                         }
-                                                    _ => unsafe {std::intrinsics::unreachable(); }
+                                                    _ => unsafe { std::intrinsics::unreachable(); }
                                                 }
                                             }
                                         }
@@ -133,7 +138,7 @@ impl ReadSocket {
                                                             client.send(ClientReply::QueryList(t))
                                                                 .check_error();
                                                         }
-                                                    _ => unsafe {std::intrinsics::unreachable(); }
+                                                    _ => unsafe { std::intrinsics::unreachable(); }
                                                 }
                                             }
                                         }
@@ -157,7 +162,7 @@ impl ReadSocket {
                                                 client.send(ClientReply::Success(format!("{} added", name)))
                                                     .check_error();
                                             }
-                                            _ => unsafe {std::intrinsics::unreachable(); }
+                                            _ => unsafe { std::intrinsics::unreachable(); }
                                         }
                                     });
                                     debug!("add issued at task{}", handle.task().id())
@@ -165,7 +170,10 @@ impl ReadSocket {
                                 ServerMsg::Remove(name) => {
                                     let mut client = client.clone();
                                     let mut db = db.clone();
+                                    let mut keeper = keeper.clone();
                                     let handle = async_std::task::spawn(async move {
+                                        keeper.send(KeeperMsg::Unregister(name.clone()))
+                                            .check_error();
                                         match db.call(DbMsg::Remove(name.clone())).await
                                             .map_err(|x| x.into())
                                             .and_then(|x| x) {
@@ -178,10 +186,114 @@ impl ReadSocket {
                                                 client.send(ClientReply::Success(format!("{} removed", name)))
                                                     .check_error();
                                             }
-                                            _ => unsafe {std::intrinsics::unreachable(); }
+                                            _ => unsafe { std::intrinsics::unreachable(); }
                                         }
                                     });
                                     debug!("add issued at task {}", handle.task().id())
+                                }
+                                ServerMsg::QueryRunning => {
+                                    let mut keeper = keeper.clone();
+                                    let mut client = client.clone();
+                                    let handle = async_std::task::spawn(async move {
+                                        match keeper.call(crate::trace::AllRunning)
+                                            .await {
+                                            Ok(list) => client.send(ClientReply::Running(list)).check_error(),
+                                            Err(e) => {
+                                                error!("{}", e);
+                                                client.send(ClientReply::Error(format!("failed to get runing list: {}", e)))
+                                                    .check_error();
+                                            }
+                                        }
+                                    });
+                                    debug!("running list query issued at task {}", handle.task().id())
+                                }
+                                ServerMsg::Stop(name) => {
+                                    let mut keeper = keeper.clone();
+                                    let mut client = client.clone();
+                                    let handle = async_std::task::spawn(async move {
+                                        match keeper.call(KeeperMsg::Unregister(name.clone()))
+                                            .await {
+                                            Err(e) => {
+                                                error!("{}", e);
+                                                client.send(ClientReply::Error(format!("failed to get runing list: {}", e)))
+                                                    .check_error();
+                                            }
+                                            Ok(_) => client.send(ClientReply::Success(format!("stop trace {}", name)))
+                                                .check_error(),
+                                        }
+                                    });
+                                    debug!("running list query issued at task {}", handle.task().id())
+                                }
+                                ServerMsg::Start(name) => {
+                                    let mut client = client.clone();
+                                    let mut db = db.clone();
+                                    let mut keeper = keeper.clone();
+                                    let handle = async_std::task::spawn(async move {
+                                        match db.call(DbMsg::Get(name.clone()))
+                                            .await
+                                            .map_err(|x|x.into())
+                                            .and_then(|x|x){
+                                            Err(e) => {
+                                                error!("{}", e);
+                                                client.send(ClientReply::Error(e.to_string()))
+                                                    .check_error();
+                                            }
+                                            Ok(t) => {
+                                                match t {
+                                                    DbReply::GetResult(t) =>
+                                                        {
+                                                            match keeper.call(KeeperMsg::Start(t))
+                                                                .await {
+                                                                Err(e) => {
+                                                                    error!("{}", e);
+                                                                    client.send(ClientReply::Error(format!("failed to start trace {}: {}", name, e)))
+                                                                        .check_error();
+                                                                }
+                                                                Ok(_) => client.send(ClientReply::Success(format!("start trace {}", name)))
+                                                                    .check_error(),
+                                                            }
+                                                        }
+                                                    _ => unsafe { std::intrinsics::unreachable(); }
+                                                }
+                                            }
+                                        }
+                                    });
+                                    debug!("start trace issued at task {}", handle.task().id())
+                                }
+                                ServerMsg::StartAll => {
+                                    let mut client = client.clone();
+                                    let mut db = db.clone();
+                                    let mut keeper = keeper.clone();
+                                    let handle = async_std::task::spawn(async move {
+                                        match db.call(DbMsg::QueryAll).await
+                                            .map_err(|x| x.into())
+                                            .and_then(|x| x) {
+                                            Err(e) => {
+                                                error!("{}", e);
+                                                client.send(ClientReply::Error(e.to_string()))
+                                                    .check_error();
+                                            }
+                                            Ok(t) => {
+                                                match t {
+                                                    DbReply::AllList(t) =>
+                                                        {
+                                                            match keeper.call(KeeperMsg::StartAll(t))
+                                                                .await {
+                                                                Err(e) => {
+                                                                    error!("{}", e);
+                                                                    client.send(ClientReply::Error(format!("failed to start all traces: {}", e)))
+                                                                        .check_error();
+                                                                }
+                                                                Ok(_) => client.send(ClientReply::Success(format!("start all traces")))
+                                                                    .check_error(),
+                                                            }
+                                                        }
+                                                    _ => unsafe { std::intrinsics::unreachable(); }
+                                                }
+                                            }
+                                        }
+                                    });
+                                    debug!("start all issued at task {}", handle.task().id())
                                 }
                             }
                         }
