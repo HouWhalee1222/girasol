@@ -52,6 +52,7 @@ pub enum ServerMsg {
     Stop(String),
     StartAll,
     QueryRunning,
+    StopAll
 }
 
 #[xactor::message(result = "()")]
@@ -143,7 +144,7 @@ impl ReadSocket {
                                             }
                                         }
                                     });
-                                    debug!("query issued at task {}", handle.task().id())
+                                    debug!("query all issued at task {}", handle.task().id())
                                 }
                                 ServerMsg::Add(model) => {
                                     let mut client = client.clone();
@@ -189,7 +190,7 @@ impl ReadSocket {
                                             _ => unsafe { std::intrinsics::unreachable(); }
                                         }
                                     });
-                                    debug!("add issued at task {}", handle.task().id())
+                                    debug!("remove issued at task {}", handle.task().id())
                                 }
                                 ServerMsg::QueryRunning => {
                                     let mut keeper = keeper.clone();
@@ -222,7 +223,22 @@ impl ReadSocket {
                                                 .check_error(),
                                         }
                                     });
-                                    debug!("running list query issued at task {}", handle.task().id())
+                                    debug!("stop trace issued at task {}", handle.task().id())
+                                }
+                                ServerMsg::StopAll => {
+                                    let mut client = client.clone();
+                                    let mut keeper = keeper.clone();
+                                    let handle = async_std::task::spawn(async move {
+                                        match keeper.send(KeeperMsg::StopAll) {
+                                            Ok(_) => client.send(ClientReply::Success(String::from(
+                                                "stopped all traces"
+                                            ))).check_error(),
+                                            Err(e) => client.send(ClientReply::Error(format!(
+                                                "cannot issue stop event: {}", e
+                                            ))).check_error()
+                                        }
+                                    });
+                                    debug!("stop all trace issued at task {}", handle.task().id())
                                 }
                                 ServerMsg::Start(name) => {
                                     let mut client = client.clone();

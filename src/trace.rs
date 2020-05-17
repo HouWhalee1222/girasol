@@ -61,6 +61,7 @@ pub enum KeeperMsg {
     Unregister(String),
     StartAll(Vec<TraceModel>),
     Start(TraceModel),
+    StopAll
 }
 
 #[xactor::message(result = "Vec<String>")]
@@ -216,6 +217,7 @@ impl Handler<KeeperMsg> for HouseKeeper {
                 {
                     for mut i in self.running_trace.remove(name.as_str()) {
                         i.stop(None).check_error();
+                        info!("send stop to trace {} at {}", name, i.actor_id());
                     }
                 }
             KeeperMsg::StartAll(list) => {
@@ -229,6 +231,13 @@ impl Handler<KeeperMsg> for HouseKeeper {
                 if !self.running_trace.contains_key(model.name.as_str()) {
                     self.create_actor(model, ctx).await.check_error();
                 }
+            }
+            KeeperMsg::StopAll => {
+                for (name, addr) in self.running_trace.iter_mut() {
+                    addr.stop(None).check_error();
+                    info!("send stop to trace {} at {}", name, addr.actor_id());
+                }
+                self.running_trace.clear();
             }
         }
     }
