@@ -12,6 +12,7 @@ use xactor::{Actor, Addr, Context, Handler, Message};
 
 use crate::database::TraceModel;
 use crate::utils::CheckError;
+use nix::unistd::Pid;
 
 macro_rules! template {
     () => {
@@ -211,9 +212,11 @@ impl TraceActor {
         }
     }
     async fn handle_perf_ending(&mut self, ctx: &Context<Self>) {
-        if let Some(mut child) = self.child.take() {
-            child.kill().map_err(|x| x.into())
+        if let Some(child) = self.child.take() {
+            nix::sys::signal::kill(Pid::from_raw(child.id() as i32), nix::sys::signal::SIGINT)
+                .map_err(|x|x.into())
                 .check_error();
+            async_std::task::sleep(Duration::from_millis(500)).await;
             let filename = format!("/tmp/girasol-perf-{}.data", self.model.name);
             match std::process::Command::new("perf")
                 .arg("report")
@@ -237,7 +240,7 @@ impl TraceActor {
                     let reader = output.lines();
                     for i in reader {
                         if let Ok(i) = i {
-                            let res : &str = i.trim();
+                            let res: &str = i.trim();
                             if !res.starts_with("#") && !res.is_empty() {
                                 let mut words = res.split_ascii_whitespace();
                                 words.next();
@@ -254,11 +257,14 @@ impl TraceActor {
                                     }
                                 ) {
                                     let count: usize = count.parse().unwrap_or(0);
+                                    if from.starts_with("0x") || to.starts_with("0x") {
+                                        continue;
+                                    }
                                     self.send_client.send(Connect {
                                         trace_name: self.model.name.clone(),
                                         callee: to.to_string(),
                                         caller: from.to_string(),
-                                        weight: count
+                                        weight: count,
                                     }).check_error();
                                 }
                             }
@@ -278,8 +284,10 @@ impl TraceActor {
                     .map(|x| x.into_iter().map(|x| x.to_string()))
                     .map(|x| x.collect::<Vec<_>>().join(",")) {
                     Ok(pids) => {
+                        info!("perf start with pids: {}", pids);
                         let mut child = std::process::Command::new("perf");
                         child.arg("record")
+                            .arg("--no-buffering")
                             .arg("--branch-filter=any_call,u")
                             .arg("-e")
                             .arg("branches:u")
