@@ -73,17 +73,50 @@ impl DataActor {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "method", content = "content")]
+pub enum TraceContent {
+    SystemTap {
+        function_list: Vec<String>,
+        process: String,
+        args: Vec<String>,
+        envs: Vec<(String, String)>,
+    },
+    PerfBranch {
+        frequency: Frequency,
+        absolute_path: String,
+        additional_args: Vec<String>,
+    }
+}
 
+#[derive(serde::Serialize, serde::Deserialize, Copy, Clone)]
+#[serde(tag = "frequency_mode", content = "value")]
+pub enum Frequency {
+    Max, Default, Specific(usize)
+}
+
+impl Default for Frequency {
+    fn default() -> Self {
+        Frequency::Default
+    }
+}
+
+impl Default for TraceContent {
+    fn default() -> Self {
+        TraceContent::PerfBranch {
+            frequency: Frequency::Default,
+            absolute_path: String::new(),
+            additional_args: Vec::new(),
+        }
+    }
+}
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct TraceModel {
     pub(crate) name: String,
-    pub function_list: Vec<String>,
-    pub process: String,
-    pub args: Vec<String>,
-    pub envs: Vec<(String, String)>,
-    pub lasting: usize,
-    pub interval: usize,
+    pub(crate) lasting: usize,
+    pub(crate) interval: usize,
+    pub(crate) content: TraceContent
 }
 
 #[xactor::message(result = "anyhow::Result<DbReply>")]
