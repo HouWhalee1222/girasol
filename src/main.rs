@@ -8,6 +8,7 @@ use structopt::StructOpt;
 use xactor::Actor;
 
 use config::{Config, SubCommand};
+use crate::utils::CheckError;
 
 mod database;
 mod config;
@@ -34,6 +35,10 @@ async fn main() -> Result<()> {
                 send_client: send_client.clone(),
                 running_trace: HashMap::new(),
             }.start().await;
+            let handle = std::cell::UnsafeCell::new(db_actor.clone());
+            ctrlc::set_handler(move || unsafe {
+                (*handle.get()).stop(None).check_error();
+            })?;
             rd.listen(db_actor.clone(), send_client.clone(), keeper.clone()).await;
             keeper.stop(None)?;
             send_client.stop(None)?;

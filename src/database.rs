@@ -1,4 +1,5 @@
 #![allow(unused)]
+
 use std::path::{Path, PathBuf};
 
 use anyhow::*;
@@ -44,7 +45,10 @@ pub async fn insert_str<A: AsRef<str>, B: AsRef<str>>(key: A, content: B, db: &s
         .map_err(|e| e.into())
         .and_then(|flag| if flag { Err(anyhow!("{} exists", key.as_ref())) } else { Ok(()) })
         .and_then(|_| db.insert(key.as_ref(), content.as_ref()).map_err(|x| x.into())) {
-        Ok(_) => db.flush_async().await.map(|e| trace!("{} bytes flushed", e)).map_err(|x| x.into()),
+        Ok(_) => {
+            async_std::task::spawn(db.flush_async());
+            Ok(())
+        }
         e => e.map(|_| ())
     }
 }
@@ -56,7 +60,10 @@ pub async fn insert_obj<A: AsRef<str>, B: Serialize>(key: A, content: B, db: &sl
         .and_then(|flag| if flag { Err(anyhow!("{} exists", key.as_ref())) } else { Ok(()) })
         .and_then(|_| simd_json::to_vec(&content).map_err(|x| x.into()))
         .and_then(|obj| db.insert(key.as_ref(), obj).map_err(|x| x.into())) {
-        Ok(_) => db.flush_async().await.map(|e| trace!("{} bytes flushed", e)).map_err(|x| x.into()),
+        Ok(_) => {
+            async_std::task::spawn(db.flush_async());
+            Ok(())
+        }
         e => e.map(|_| ())
     }
 }
@@ -73,6 +80,8 @@ impl DataActor {
     }
 }
 
+
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(tag = "method", content = "content")]
 pub enum TraceContent {
@@ -86,13 +95,15 @@ pub enum TraceContent {
         frequency: Frequency,
         absolute_path: String,
         additional_args: Vec<String>,
-    }
+    },
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Copy, Clone)]
 #[serde(tag = "frequency_mode", content = "value")]
 pub enum Frequency {
-    Max, Default, Specific(usize)
+    Max,
+    Default,
+    Specific(usize),
 }
 
 impl Default for Frequency {
@@ -116,7 +127,7 @@ pub struct TraceModel {
     pub(crate) name: String,
     pub(crate) lasting: usize,
     pub(crate) interval: usize,
-    pub(crate) content: TraceContent
+    pub(crate) content: TraceContent,
 }
 
 #[xactor::message(result = "anyhow::Result<DbReply>")]
@@ -138,6 +149,12 @@ impl Actor for DataActor {
     async fn started(&mut self, _: &xactor::Context<Self>) {
         info!("database actor started");
     }
+    async fn stopped(&mut self, _: &xactor::Context<Self>) {
+        match self.db.flush() {
+            Ok(e) => trace!("db finalized with {} bytes flushed", e),
+            Err(e) => error!("{}", e)
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -152,7 +169,7 @@ impl Handler<DbMsg> for DataActor {
                             .map(|(_, y)| y)
                             .map(|x| x.to_vec())
                             .and_then(|mut x| simd_json::from_slice(x.as_mut_slice())
-                                .map_err(|x|x.into()))
+                                .map_err(|x| x.into()))
                             .map(|model| {
                                 x.push(model);
                                 x
@@ -168,7 +185,7 @@ impl Handler<DbMsg> for DataActor {
             DbMsg::Remove(name) => {
                 match self.db.contains_key(&name) {
                     Ok(true) => self.db.remove(name)
-                        .and_then(|_| self.db.flush().map_err(|x|x.into()))
+                        .map(|_| async_std::task::spawn(self.db.flush_async()))
                         .map(|_| DbReply::Success)
                         .map_err(|x| x.into()),
                     Ok(false) => Err(anyhow!("{} does not exist", name)),
