@@ -1,13 +1,10 @@
-#![allow(unused)]
 use prettytable::Table;
 use serde::Serialize;
 use std::fmt::Display;
 use serde_json::Value;
 use prettytable::*;
 use anyhow::*;
-use std::path::Path;
 use std::fs::{read_dir, read_link};
-use std::ffi::OsStr;
 
 pub trait CheckError {
     fn check_error(&self);
@@ -85,42 +82,15 @@ impl ToTableItem for Value {
 
 
 pub fn find_running(s: &str) -> Result<Vec<i32>> {
-    let mut ret = vec![];
-    let proc_path = Path::new("/proc");
-    for entry in read_dir(proc_path)? {
-        let entry = entry;
-        if let Err(_) = entry {
-            continue;
-        }
-        let entry = entry.unwrap();
-        let path = entry.path();
-        let op_filename = path.file_name();
-        if let None = op_filename {
-            continue;
-        }
-        let pid = op_filename
-            .unwrap_or(&OsStr::new(""))
-            .to_str()
-            .unwrap_or("")
-            .parse::<i32>();
-        if let Err(_) = pid {
-            continue;
-        }
-        let pid = pid.unwrap();
-        let mut pid_path = proc_path.to_owned();
-        pid_path.push(op_filename.unwrap());
-        pid_path.push("exe");
-        if let Ok(attr) = read_link(&pid_path) {
-            let p = attr.to_str().unwrap_or("");
-            if s == p {
-                ret.push(pid);
-            }
-        }
-    }
-    if ret.is_empty() {
-        Err(anyhow!("no running process"))
-    } else {
-        Ok(ret)
-    }
+    read_dir("/proc").map(|entry| {
+        entry.filter_map(Result::ok)
+            .map(|x|x.file_name())
+            .filter_map(|name|name.to_str().and_then(|x|x.parse::<i32>().ok()))
+            .filter(|x| read_link(format!("/proc/{}/exe", x))
+                .ok()
+                .and_then(|x|x.to_str().map(|x| x == s))
+                .unwrap_or(false))
+            .collect()
+    }).map_err(std::io::Error::into)
 }
 

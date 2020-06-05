@@ -283,7 +283,7 @@ impl TraceActor {
                 match crate::utils::find_running(absolute_path.as_str())
                     .map(|x| x.into_iter().map(|x| x.to_string()))
                     .map(|x| x.collect::<Vec<_>>().join(",")) {
-                    Ok(pids) => {
+                    Ok(pids) if !pids.is_empty() => {
                         info!("perf start with pids: {}", pids);
                         let mut child = std::process::Command::new("perf");
                         child.arg("record")
@@ -340,6 +340,9 @@ impl TraceActor {
                             trace_name: self.model.name.clone(),
                             content: e.to_string(),
                         }).check_error();
+                    }
+                    _ => {
+                        warn!("no running process");
                     }
                 }
             }
