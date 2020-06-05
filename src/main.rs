@@ -9,6 +9,7 @@ use xactor::Actor;
 
 use config::{Config, SubCommand};
 use crate::utils::CheckError;
+use crate::database::DbMsg;
 
 mod database;
 mod config;
@@ -37,7 +38,8 @@ async fn main() -> Result<()> {
             }.start().await;
             let handle = std::cell::UnsafeCell::new(db_actor.clone());
             ctrlc::set_handler(move || unsafe {
-                (*handle.get()).stop(None).check_error();
+                async_std::task::block_on((*handle.get()).call(DbMsg::Kill)).check_error();
+                std::process::exit(0);
             })?;
             rd.listen(db_actor.clone(), send_client.clone(), keeper.clone()).await;
             keeper.stop(None)?;
@@ -56,7 +58,7 @@ async fn main() -> Result<()> {
             config::handle_remove(db_actor.clone(), name).await;
         }
     }
-    db_actor.stop(None)?;
+    db_actor.call(DbMsg::Kill).await.check_error();
     Ok(())
 }
 

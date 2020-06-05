@@ -133,6 +133,7 @@ pub struct TraceModel {
 #[xactor::message(result = "anyhow::Result<DbReply>")]
 pub enum DbMsg {
     QueryAll,
+    Kill,
     Get(String),
     Remove(String),
     Add(TraceModel),
@@ -148,12 +149,6 @@ pub enum DbReply {
 impl Actor for DataActor {
     async fn started(&mut self, _: &xactor::Context<Self>) {
         info!("database actor started");
-    }
-    async fn stopped(&mut self, _: &xactor::Context<Self>) {
-        match self.db.flush() {
-            Ok(e) => trace!("db finalized with {} bytes flushed", e),
-            Err(e) => error!("{}", e)
-        }
     }
 }
 
@@ -181,6 +176,14 @@ impl Handler<DbMsg> for DataActor {
             DbMsg::Get(name) => {
                 query_json(name, &self.db).await
                     .map(|x| DbReply::GetResult(x))
+            }
+            DbMsg::Kill => {
+                match self.db.flush() {
+                    Ok(e) => trace!("db finalized with {} bytes flushed", e),
+                    Err(e) => error!("{}", e)
+                }
+                _ctx.stop(None);
+                Ok(DbReply::Success)
             }
             DbMsg::Remove(name) => {
                 match self.db.contains_key(&name) {
