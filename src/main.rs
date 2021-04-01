@@ -10,13 +10,15 @@ use xactor::Actor;
 use config::{Config, SubCommand};
 use crate::utils::CheckError;
 use crate::database::{DbMsg, DbReply};
-use crate::trace::TraceActor;
+use crate::trace::{TraceActor, TraceEvent};
 use crate::database::DbMsg::Get;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::cmp::Ordering;
 use std::sync::atomic::Ordering::SeqCst;
 use std::hint::spin_loop;
+use async_tungstenite::tungstenite::Message;
+use serde::de::Unexpected::Seq;
 
 mod database;
 mod config;
@@ -65,7 +67,8 @@ async fn main() -> Result<()> {
             config::handle_remove(db_actor.clone(), name).await;
         }
         SubCommand::Local { name, round, pattern } => {
-            let written = Arc::new(AtomicUsize::new(round));
+            let written = Arc::new(
+                (async_std::sync::Condvar::new(), async_std::sync::Mutex::new(AtomicUsize::new(round))));
             if let DbReply::GetResult(model) = db_actor.call(Get(name)).await?? {
                 let actor = TraceActor {
                     house_keeper: None,
@@ -74,11 +77,13 @@ async fn main() -> Result<()> {
                     file: None,
                     child: None,
                     written: written.clone(),
-                    pattern
+                    pattern,
                 };
+                log::debug!("starting actor");
                 let mut addr = actor.start().await;
-                while written.load(SeqCst) != 0 {
-                    spin_loop();
+                let mut handle = written.1.lock().await;
+                while handle.load(SeqCst) != 0 {
+                    handle = written.0.wait(handle).await;
                 }
                 addr.stop(None)?;
             }

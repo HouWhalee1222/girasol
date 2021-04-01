@@ -63,7 +63,7 @@ pub struct TraceActor {
     pub(crate) model: TraceModel,
     pub(crate) file: Option<NamedTempFile>,
     pub(crate) child: Option<std::process::Child>,
-    pub(crate) written: Arc<AtomicUsize>,
+    pub(crate) written: Arc<(async_std::sync::Condvar, async_std::sync::Mutex<AtomicUsize>)>,
     pub(crate) pattern: String,
 }
 
@@ -87,6 +87,7 @@ pub struct AllRunning;
 #[async_trait::async_trait]
 impl Actor for TraceActor {
     async fn started(&mut self, ctx: &Context<Self>) {
+        log::debug!("starting next round info");
         if let Err(e) = ctx.address().send(TraceEvent::NextRound) {
             error!("trace {} cannot start the event with err: {}, going to suicide!", self.model.name, e);
             ctx.stop(None);
@@ -293,9 +294,12 @@ impl TraceActor {
                     }
                     if self.send_client.is_none() {
                         let json = simd_json::to_string_pretty(&data).unwrap();
-                        std::fs::write(format!("{}-{}.json", self.pattern, self.written.load(SeqCst)), json).unwrap();
-                        self.written.fetch_sub(1, SeqCst);
+                        let handle = self.written.1.lock().await;
+                        std::fs::write(format!("{}-{}.json", self.pattern, handle.load(SeqCst)), json).unwrap();
+                        handle.fetch_sub(1, SeqCst);
+                        self.written.0.notify_one();
                     }
+
                 }
             }
         }
@@ -386,6 +390,7 @@ impl TraceActor {
 #[async_trait::async_trait]
 impl Handler<TraceEvent> for TraceActor {
     async fn handle(&mut self, ctx: &Context<Self>, event: TraceEvent) {
+        log::debug!("received message");
         match event {
             TraceEvent::NextRound => match self.model.content {
                 crate::database::TraceContent::SystemTap {
@@ -396,6 +401,7 @@ impl Handler<TraceEvent> for TraceActor {
                 crate::database::TraceContent::PerfBranch {
                     ..
                 } => {
+                    log::debug!("start perfing");
                     self.handle_perf(ctx).await
                 }
             }
