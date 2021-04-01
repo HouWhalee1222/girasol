@@ -13,6 +13,9 @@ use xactor::{Actor, Addr, Context, Handler, Message};
 use crate::database::TraceModel;
 use crate::utils::CheckError;
 use nix::unistd::Pid;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::Arc;
+use std::sync::atomic::Ordering::SeqCst;
 
 macro_rules! template {
     () => {
@@ -55,11 +58,13 @@ pub struct HouseKeeper {
 }
 
 pub struct TraceActor {
-    house_keeper: Addr<HouseKeeper>,
-    send_client: Addr<crate::client::SendClient>,
-    model: TraceModel,
-    file: Option<NamedTempFile>,
-    child: Option<std::process::Child>,
+    pub(crate) house_keeper: Option<Addr<HouseKeeper>>,
+    pub(crate) send_client: Option<Addr<crate::client::SendClient>>,
+    pub(crate) model: TraceModel,
+    pub(crate) file: Option<NamedTempFile>,
+    pub(crate) child: Option<std::process::Child>,
+    pub(crate) written: Arc<AtomicUsize>,
+    pub(crate) pattern: String,
 }
 
 #[xactor::message(result = "()")]
@@ -100,9 +105,11 @@ impl Actor for TraceActor {
 
 impl TraceActor {
     async fn commit_suicide(&mut self) {
-        self.house_keeper.send(KeeperMsg::Unregister(self.model.name.clone()))
-            .map_err(|x| x.into())
-            .check_error()
+        if let Some(keeper) = &mut self.house_keeper {
+            keeper.send(KeeperMsg::Unregister(self.model.name.clone()))
+                .map_err(|x| x.into())
+                .check_error()
+        }
     }
 }
 
@@ -165,10 +172,12 @@ impl TraceActor {
                             for i in std::io::BufReader::new(err).lines() {
                                 if let Ok(c) = i {
                                     error!("trace {} error: {}", err_name, c);
-                                    err_client.send(TraceError {
-                                        trace_name: err_name.clone(),
-                                        content: c,
-                                    }).check_error();
+                                    if let Some(err_client) = &mut err_client {
+                                        err_client.send(TraceError {
+                                            trace_name: err_name.clone(),
+                                            content: c,
+                                        }).check_error();
+                                    }
                                 }
                             }
                         });
@@ -182,14 +191,16 @@ impl TraceActor {
                                             .and_then(|x| x.split("+")
                                                 .next())
                                             .filter(|x| !x.starts_with("0x")) {
-                                            self.send_client.send(Connect {
-                                                trace_name: self.model.name.clone(),
-                                                callee: t,
-                                                caller: String::from(e),
-                                                weight: 1,
-                                            })
-                                                .map_err(|x| x.into())
-                                                .check_error()
+                                            if let Some(send_client) = &mut self.send_client {
+                                                send_client.send(Connect {
+                                                    trace_name: self.model.name.clone(),
+                                                    callee: t,
+                                                    caller: String::from(e),
+                                                    weight: 1,
+                                                })
+                                                    .map_err(|x| x.into())
+                                                    .check_error()
+                                            }
                                         }
                                     }
                                 } else {
@@ -214,7 +225,7 @@ impl TraceActor {
     async fn handle_perf_ending(&mut self, ctx: &Context<Self>) {
         if let Some(child) = self.child.take() {
             nix::sys::signal::kill(Pid::from_raw(child.id() as i32), nix::sys::signal::SIGINT)
-                .map_err(|x|x.into())
+                .map_err(|x| x.into())
                 .check_error();
             async_std::task::sleep(Duration::from_millis(500)).await;
             let filename = format!("/tmp/girasol-perf-{}.data", self.model.name);
@@ -230,14 +241,15 @@ impl TraceActor {
                 .spawn()
                 .and_then(|x| x.wait_with_output())
                 .map(|x| { x.stdout }) {
-                Err(e) => {
-                    self.send_client.send(TraceError {
+                Err(e) => if let Some(send_client) = &mut self.send_client {
+                    send_client.send(TraceError {
                         trace_name: self.model.name.clone(),
                         content: e.to_string(),
                     }).check_error();
                 }
                 Ok(output) => {
                     let reader = output.lines();
+                    let mut data = Vec::new();
                     for i in reader {
                         if let Ok(i) = i {
                             let res: &str = i.trim();
@@ -260,15 +272,29 @@ impl TraceActor {
                                     if from.starts_with("0x") || to.starts_with("0x") {
                                         continue;
                                     }
-                                    self.send_client.send(Connect {
-                                        trace_name: self.model.name.clone(),
-                                        callee: to.to_string(),
-                                        caller: from.to_string(),
-                                        weight: count,
-                                    }).check_error();
+                                    if let Some(sender) = &mut self.send_client {
+                                        sender.send(Connect {
+                                            trace_name: self.model.name.clone(),
+                                            callee: to.to_string(),
+                                            caller: from.to_string(),
+                                            weight: count,
+                                        }).check_error();
+                                    } else {
+                                        data.push(Connect {
+                                            trace_name: self.model.name.clone(),
+                                            callee: to.to_string(),
+                                            caller: from.to_string(),
+                                            weight: count,
+                                        });
+                                    }
                                 }
                             }
                         }
+                    }
+                    if self.send_client.is_none() {
+                        let json = simd_json::to_string_pretty(&data).unwrap();
+                        std::fs::write(format!("{}-{}.json", self.pattern, self.written.load(SeqCst)), json).unwrap();
+                        self.written.fetch_sub(1, SeqCst);
                     }
                 }
             }
@@ -315,10 +341,12 @@ impl TraceActor {
                                     async_std::task::spawn(async move {
                                         for i in std::io::BufReader::new(stderr).lines() {
                                             if let Ok(line) = i {
-                                                addr.send(TraceError {
-                                                    trace_name: name.clone(),
-                                                    content: line,
-                                                }).check_error();
+                                                if let Some(sender) = &mut addr {
+                                                    sender.send(TraceError {
+                                                        trace_name: name.clone(),
+                                                        content: line,
+                                                    }).check_error();
+                                                }
                                             }
                                         }
                                     });
@@ -328,18 +356,22 @@ impl TraceActor {
                                 ctx.send_later(TraceEvent::PerfEnding, Duration::from_secs(self.model.lasting as u64))
                             }
                             Err(e) => {
-                                self.send_client.send(TraceError {
-                                    trace_name: self.model.name.clone(),
-                                    content: e.to_string(),
-                                }).check_error();
+                                if let Some(sender) = &mut self.send_client {
+                                    sender.send(TraceError {
+                                        trace_name: self.model.name.clone(),
+                                        content: e.to_string(),
+                                    }).check_error();
+                                }
                             }
                         }
                     }
                     Err(e) => {
-                        self.send_client.send(TraceError {
-                            trace_name: self.model.name.clone(),
-                            content: e.to_string(),
-                        }).check_error();
+                        if let Some(sender) = &mut self.send_client {
+                            sender.send(TraceError {
+                                trace_name: self.model.name.clone(),
+                                content: e.to_string(),
+                            }).check_error();
+                        }
                     }
                     _ => {
                         warn!("no running process");
@@ -378,11 +410,13 @@ impl HouseKeeper {
         if !flag {
             let name = model.name.clone();
             let actor = TraceActor {
-                house_keeper: ctx.address(),
-                send_client: self.send_client.clone(),
+                house_keeper: Some(ctx.address()),
+                send_client: Some(self.send_client.clone()),
                 model,
                 file: None,
                 child: None,
+                written: Arc::new(Default::default()),
+                pattern: "".to_string()
             };
             let addr = actor.start().await;
             self.running_trace.insert(name, addr);

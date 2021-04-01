@@ -35,6 +35,15 @@ pub enum SubCommand {
         #[structopt(short, long, help="The name of the model")]
         name: String
     },
+    #[structopt(about = "Local run")]
+    Local {
+        #[structopt(short, long, help="The name of the model")]
+        name: String,
+        #[structopt(short, long, help="Round to go")]
+        round: usize,
+        #[structopt(short, long, help="Output file pattern")]
+        pattern: String
+    }
 }
 
 

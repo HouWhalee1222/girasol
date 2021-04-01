@@ -9,7 +9,14 @@ use xactor::Actor;
 
 use config::{Config, SubCommand};
 use crate::utils::CheckError;
-use crate::database::DbMsg;
+use crate::database::{DbMsg, DbReply};
+use crate::trace::TraceActor;
+use crate::database::DbMsg::Get;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::Arc;
+use std::cmp::Ordering;
+use std::sync::atomic::Ordering::SeqCst;
+use std::hint::spin_loop;
 
 mod database;
 mod config;
@@ -56,6 +63,25 @@ async fn main() -> Result<()> {
         }
         SubCommand::Remove { name } => {
             config::handle_remove(db_actor.clone(), name).await;
+        }
+        SubCommand::Local { name, round, pattern } => {
+            let written = Arc::new(AtomicUsize::new(round));
+            if let DbReply::GetResult(model) = db_actor.call(Get(name)).await?? {
+                let actor = TraceActor {
+                    house_keeper: None,
+                    send_client: None,
+                    model,
+                    file: None,
+                    child: None,
+                    written: written.clone(),
+                    pattern
+                };
+                let mut addr = actor.start().await;
+                while written.load(SeqCst) != 0 {
+                    spin_loop();
+                }
+                addr.stop(None)?;
+            }
         }
     }
     db_actor.call(DbMsg::Kill).await.check_error();
