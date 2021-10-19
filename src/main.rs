@@ -42,6 +42,7 @@ async fn main() -> Result<()> {
             let (mut rd, wt) = socket::create_sockets(&server).await?;
             let mut send_client = client::SendClient::new(wt).start().await;
             let mut keeper = trace::HouseKeeper {
+                running_pids: Arc::new(Default::default()),
                 send_client: send_client.clone(),
                 running_trace: HashMap::new(),
             }.start().await;
@@ -71,6 +72,8 @@ async fn main() -> Result<()> {
                 (async_std::sync::Condvar::new(), async_std::sync::Mutex::new(AtomicUsize::new(round))));
             if let DbReply::GetResult(model) = db_actor.call(Get(name)).await?? {
                 let actor = TraceActor {
+                    running_pids: Arc::new(Default::default()),
+                    local_pids: Default::default(),
                     house_keeper: None,
                     send_client: None,
                     model,

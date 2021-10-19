@@ -53,11 +53,14 @@ fn to_tempfile(m: &TraceModel) -> Result<tempfile::NamedTempFile> {
 }
 
 pub struct HouseKeeper {
+    pub(crate) running_pids: Arc<crossbeam_skiplist::SkipSet<i32>>,
     pub(crate) send_client: Addr<crate::client::SendClient>,
     pub(crate) running_trace: HashMap<String, Addr<TraceActor>>,
 }
 
 pub struct TraceActor {
+    pub(crate) running_pids: Arc<crossbeam_skiplist::SkipSet<i32>>,
+    pub(crate) local_pids: crossbeam_skiplist::SkipSet<i32>,
     pub(crate) house_keeper: Option<Addr<HouseKeeper>>,
     pub(crate) send_client: Option<Addr<crate::client::SendClient>>,
     pub(crate) model: TraceModel,
@@ -224,6 +227,9 @@ impl TraceActor {
         }
     }
     async fn handle_perf_ending(&mut self, ctx: &Context<Self>) {
+        for i in &self.local_pids {
+            self.running_pids.remove(i.value());
+        }
         if let Some(child) = self.child.take() {
             nix::sys::signal::kill(Pid::from_raw(child.id() as i32), nix::sys::signal::SIGINT)
                 .map_err(|x| x.into())
@@ -299,7 +305,6 @@ impl TraceActor {
                         handle.fetch_sub(1, SeqCst);
                         self.written.0.notify_one();
                     }
-
                 }
             }
         }
@@ -311,7 +316,20 @@ impl TraceActor {
                 frequency, absolute_path, additional_args, ..
             } => {
                 match crate::utils::find_running(absolute_path.as_str())
-                    .map(|x| x.into_iter().map(|x| x.to_string()))
+                    .map(|x| {
+                        self.local_pids.clear();
+                        for i in x.iter()
+                            .filter(|x| !self.running_pids.contains(x)) {
+                            self.local_pids.insert(*i);
+                        }
+                        x.into_iter()
+                            .filter(|x| !self.running_pids.contains(x))
+                            .map(|x|
+                                {
+                                    self.running_pids.insert(x);
+                                    x.to_string()
+                                })
+                    })
                     .map(|x| x.collect::<Vec<_>>().join(",")) {
                     Ok(pids) if !pids.is_empty() => {
                         info!("perf start with pids: {}", pids);
@@ -416,13 +434,15 @@ impl HouseKeeper {
         if !flag {
             let name = model.name.clone();
             let actor = TraceActor {
+                running_pids: self.running_pids.clone(),
+                local_pids: Default::default(),
                 house_keeper: Some(ctx.address()),
                 send_client: Some(self.send_client.clone()),
                 model,
                 file: None,
                 child: None,
                 written: Arc::new(Default::default()),
-                pattern: "".to_string()
+                pattern: "".to_string(),
             };
             let addr = actor.start().await;
             self.running_trace.insert(name, addr);
